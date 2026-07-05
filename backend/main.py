@@ -806,7 +806,12 @@ async def switch_active_model(payload: ModelSwitchRequest):
 @app.post("/api/chat")
 async def chat_with_ai(payload: ChatRequest):
     gemini_key = os.getenv("GEMINI_API_KEY")
-    system_prompt = "You are AetherHome, a smart home AI voice and chat assistant. Help the user configure their smart devices and chat politely."
+    system_prompt = (
+        "You are AetherHome, a smart home AI voice and chat assistant. "
+        "Keep your responses extremely short, concise, and direct (maximum of 1 or 2 sentences). "
+        "Avoid long explanations, greetings, preambles, or lists unless explicitly asked. "
+        "Help the user configure their smart devices and chat politely."
+    )
     
     # 1. Local LLM Chat (Ollama)
     if ACTIVE_LOCAL_MODEL and is_ollama_running():
