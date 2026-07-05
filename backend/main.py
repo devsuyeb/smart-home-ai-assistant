@@ -771,6 +771,18 @@ async def switch_active_model(payload: ModelSwitchRequest):
             
         ACTIVE_LOCAL_MODEL = matched_model
         await broadcast_status("model_switched", {"active_model": ACTIVE_LOCAL_MODEL})
+        
+        # Asynchronously preload the model in Ollama to make subsequent chat messages fast
+        if ACTIVE_LOCAL_MODEL:
+            def preload():
+                try:
+                    logger.info(f"Preloading model {ACTIVE_LOCAL_MODEL}...")
+                    requests.post("http://localhost:11434/api/generate", json={"model": ACTIVE_LOCAL_MODEL}, timeout=90)
+                    logger.info(f"Model {ACTIVE_LOCAL_MODEL} preloaded successfully.")
+                except Exception as ex:
+                    logger.warning(f"Failed to preload model {ACTIVE_LOCAL_MODEL}: {ex}")
+            threading.Thread(target=preload, daemon=True).start()
+            
         return {"status": "success", "active_model": ACTIVE_LOCAL_MODEL}
     except HTTPException:
         raise
@@ -793,17 +805,27 @@ async def chat_with_ai(payload: ChatRequest):
                 messages.append({"role": msg.role, "content": msg.content})
             messages.append({"role": "user", "content": payload.message})
             
+            # Increased timeout to 120 seconds to give Ollama enough time to generate responses on ARM64 CPU
             r = requests.post(url, json={
                 "model": ACTIVE_LOCAL_MODEL,
                 "messages": messages,
                 "stream": False
-            }, timeout=15)
+            }, timeout=120)
             
             if r.status_code == 200:
                 ai_response = r.json().get("message", {}).get("content", "")
                 return {"response": ai_response, "source": f"local ({ACTIVE_LOCAL_MODEL})"}
+            else:
+                return {
+                    "response": f"Ollama service error: Received HTTP {r.status_code} from local server.",
+                    "source": "error"
+                }
         except Exception as e:
             logger.error(f"Local Ollama chat failed: {e}")
+            return {
+                "response": f"Local Ollama inference failed: {str(e)}. (This can happen if the CPU is cold-loading the model. Please wait a moment and try sending your message again.)",
+                "source": "error"
+            }
             
     # 2. Cloud Gemini Chat
     if gemini_key:
