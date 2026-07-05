@@ -76,6 +76,7 @@ CURRENT_PULL_PERCENT = 0
 CURRENT_PULL_SPEED = ""
 CURRENT_PULL_ETA = ""
 
+# Request Models
 class DeviceUpdate(BaseModel):
     name: str
     ip: str
@@ -86,6 +87,14 @@ class ModelPullRequest(BaseModel):
 
 class ModelSwitchRequest(BaseModel):
     model_name: str
+
+class ChatMessage(BaseModel):
+    role: str # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage] = []
 
 # ----------------- Helper: Speed & ETA Formatting -----------------
 
@@ -341,7 +350,6 @@ def bg_pull_model(model_name: str, loop):
                 total = data.get("total", 0)
                 digest = data.get("digest", "")
                 
-                # Sum layers progress to ensure monotonic percentage increments
                 if digest and (status == "downloading" or completed == total):
                     completed_by_digest[digest] = completed
                     if total > 0:
@@ -353,7 +361,6 @@ def bg_pull_model(model_name: str, loop):
                 if total_expected > 0:
                     percent = int((total_completed / total_expected) * 100)
                     percent = max(percent, CURRENT_PULL_PERCENT)
-                    # Cap at 99% until success is confirmed by response
                     if percent > 99:
                         percent = 99
                     CURRENT_PULL_PERCENT = percent
@@ -378,7 +385,6 @@ def bg_pull_model(model_name: str, loop):
                 elif status == "success":
                     logger.info(f"Model {model_name} successfully downloaded.")
                     
-        # Pull finished successfully
         CURRENT_PULLING_MODEL = None
         CURRENT_PULL_PERCENT = 0
         CURRENT_PULL_SPEED = ""
@@ -770,6 +776,65 @@ async def switch_active_model(payload: ModelSwitchRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------- FastAPI Routes: Chat with AI -----------------
+
+@app.post("/api/chat")
+async def chat_with_ai(payload: ChatRequest):
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    system_prompt = "You are AetherHome, a smart home AI voice and chat assistant. Help the user configure their smart devices and chat politely."
+    
+    # 1. Local LLM Chat (Ollama)
+    if ACTIVE_LOCAL_MODEL and is_ollama_running():
+        try:
+            url = "http://localhost:11434/api/chat"
+            messages = [{"role": "system", "content": system_prompt}]
+            for msg in payload.history:
+                messages.append({"role": msg.role, "content": msg.content})
+            messages.append({"role": "user", "content": payload.message})
+            
+            r = requests.post(url, json={
+                "model": ACTIVE_LOCAL_MODEL,
+                "messages": messages,
+                "stream": False
+            }, timeout=15)
+            
+            if r.status_code == 200:
+                ai_response = r.json().get("message", {}).get("content", "")
+                return {"response": ai_response, "source": f"local ({ACTIVE_LOCAL_MODEL})"}
+        except Exception as e:
+            logger.error(f"Local Ollama chat failed: {e}")
+            
+    # 2. Cloud Gemini Chat
+    if gemini_key:
+        try:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=gemini_key)
+            
+            contents = []
+            for msg in payload.history:
+                role_mapped = "user" if msg.role == "user" else "model"
+                contents.append(types.Content(role=role_mapped, parts=[types.Part.from_text(text=msg.content)]))
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=payload.message)]))
+            
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt
+                )
+            )
+            return {"response": response.text, "source": "gemini-cloud"}
+        except Exception as e:
+            logger.error(f"Gemini chat failed: {e}")
+            return {"response": f"Error communicating with Cloud AI: {e}", "source": "error"}
+            
+    # 3. Fallback
+    return {
+        "response": "Hello! I am AetherHome. Currently, the local LLM is not active and no cloud API key is configured. Please go to AI Settings in the top header to download a local model or set up a Gemini API Key.",
+        "source": "fallback"
+    }
 
 # ----------------- WebSockets Connection Handler -----------------
 

@@ -20,11 +20,22 @@ const settingsModal = document.getElementById('settings-modal');
 const ollamaStatusContainer = document.getElementById('ollama-status-container');
 const modelsListContainer = document.getElementById('models-list-container');
 
+// Chat Elements
+const btnVoiceTab = document.getElementById('tab-voice-btn');
+const btnChatTab = document.getElementById('tab-chat-btn');
+const tabVoiceContent = document.getElementById('tab-voice-content');
+const tabChatContent = document.getElementById('tab-chat-content');
+const chatInput = document.getElementById('chat-input');
+const btnChatSend = document.getElementById('btn-chat-send');
+const chatMessagesContainer = document.getElementById('chat-messages-container');
+const chatTypingIndicator = document.getElementById('chat-typing-indicator');
+
 // State
 let socket = null;
 let devices = {};
 let voiceLogs = [];
 let localModels = []; // Installed models on Ollama
+let chatHistory = [];
 let llmState = {
     binary_installed: false,
     service_running: false,
@@ -710,6 +721,111 @@ function escapeHtml(str) {
               .replace(/"/g, "&quot;")
               .replace(/'/g, "&#039;");
 }
+
+// ----------------- Chat and Tab switching interface functions -----------------
+
+function switchTab(tabId) {
+    if (tabId === 'voice') {
+        btnVoiceTab.classList.add('active');
+        btnChatTab.classList.remove('active');
+        tabVoiceContent.classList.add('active');
+        tabChatContent.classList.remove('active');
+    } else {
+        btnVoiceTab.classList.remove('active');
+        btnChatTab.classList.add('active');
+        tabVoiceContent.classList.remove('active');
+        tabChatContent.classList.add('active');
+        scrollChatToBottom();
+    }
+}
+
+function scrollChatToBottom() {
+    chatMessagesContainer.scrollTop = chatMessagesContainer.scrollHeight;
+}
+
+function appendChatMessage(role, content) {
+    // If welcome screen exists, remove it on first message
+    const welcome = chatMessagesContainer.querySelector('.chat-welcome');
+    if (welcome) {
+        welcome.remove();
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${role}`;
+    
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    bubble.innerHTML = `
+        <div class="chat-bubble-content">${escapeHtml(content).replace(/\n/g, '<br>')}</div>
+        <div class="chat-meta">${timeStr}</div>
+    `;
+    
+    chatMessagesContainer.appendChild(bubble);
+    scrollChatToBottom();
+}
+
+async function sendChatMessage() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    
+    chatInput.value = '';
+    
+    // Render user message instantly
+    appendChatMessage('user', text);
+    
+    // Add to local history
+    chatHistory.push({ role: 'user', content: text });
+    if (chatHistory.length > 20) chatHistory.shift();
+    
+    // Show typing state
+    chatTypingIndicator.style.display = 'flex';
+    scrollChatToBottom();
+    
+    // Disable inputs
+    chatInput.disabled = true;
+    btnChatSend.disabled = true;
+    
+    try {
+        const response = await fetch(`${apiBase}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: text,
+                history: chatHistory
+            })
+        });
+        
+        if (!response.ok) throw new Error('Chat API returned an error');
+        
+        const data = await response.json();
+        
+        // Hide typing indicator
+        chatTypingIndicator.style.display = 'none';
+        
+        // Render assistant message
+        appendChatMessage('assistant', data.response);
+        
+        // Add assistant response to history
+        chatHistory.push({ role: 'assistant', content: data.response });
+        if (chatHistory.length > 20) chatHistory.shift();
+        
+    } catch (err) {
+        console.error(err);
+        chatTypingIndicator.style.display = 'none';
+        appendChatMessage('assistant', `Failed to get response from assistant. Error: ${err.message}`);
+    } finally {
+        // Re-enable inputs
+        chatInput.disabled = false;
+        btnChatSend.disabled = false;
+        chatInput.focus();
+    }
+}
+
+// Chat Event Bindings
+btnChatSend.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') sendChatMessage();
+});
 
 // Initialize
 connectWebSocket();

@@ -22,7 +22,7 @@
                 <i class="fa-solid fa-wand-magic-sparkles brand-icon"></i>
                 <div class="logo-text">
                     <h1>AETHER<span>HOME</span></h1>
-                    <p>AI Voice Assistant Hub</p>
+                    <p>AI Voice & Chat Assistant</p>
                 </div>
             </div>
             <div class="system-status-pills">
@@ -65,46 +65,85 @@
                 </div>
             </section>
 
-            <!-- Right Panel: Voice Control & Console -->
+            <!-- Right Panel: Voice Control & Chat tabs -->
             <section class="panel-section voice-panel">
-                <div class="panel-header">
-                    <h2><i class="fa-solid fa-microphone-lines animate-pulse-slow"></i> Voice Assistant Console</h2>
+                <div class="panel-header tab-header">
+                    <div class="tabs-buttons">
+                        <button class="tab-btn active" id="tab-voice-btn" onclick="switchTab('voice')">
+                            <i class="fa-solid fa-microphone"></i> Voice Mode
+                        </button>
+                        <button class="tab-btn" id="tab-chat-btn" onclick="switchTab('chat')">
+                            <i class="fa-solid fa-comments"></i> Chat with AI
+                        </button>
+                    </div>
                 </div>
 
-                <!-- Voice Commands Visualizer / Input Simulator -->
-                <div class="voice-hero">
-                    <div class="voice-waves" id="voice-wave-container">
-                        <div class="wave wave1"></div>
-                        <div class="wave wave2"></div>
-                        <div class="wave wave3"></div>
-                        <div class="wave wave4"></div>
-                        <i class="fa-solid fa-microphone mic-inner-icon"></i>
-                    </div>
-                    
-                    <div class="assistant-prompt-text">
-                        <p class="guide-text">Say commands like: <span>"Turn on Living Room Light"</span></p>
-                        <p class="live-transcript" id="live-transcript-text">Waiting for voice input...</p>
+                <!-- Tab Content 1: Voice Mode -->
+                <div id="tab-voice-content" class="tab-content active">
+                    <!-- Voice Commands Visualizer / Input Simulator -->
+                    <div class="voice-hero">
+                        <div class="voice-waves" id="voice-wave-container">
+                            <div class="wave wave1"></div>
+                            <div class="wave wave2"></div>
+                            <div class="wave wave3"></div>
+                            <div class="wave wave4"></div>
+                            <i class="fa-solid fa-microphone mic-inner-icon"></i>
+                        </div>
+                        
+                        <div class="assistant-prompt-text">
+                            <p class="guide-text">Say commands like: <span>"Turn on Living Room Light"</span></p>
+                            <p class="live-transcript" id="live-transcript-text">Waiting for voice input...</p>
+                        </div>
+
+                        <!-- Simulator Input -->
+                        <div class="voice-simulator-box">
+                            <label for="sim-input">Voice Command Simulator</label>
+                            <div class="input-group">
+                                <input type="text" id="sim-input" placeholder="Type a voice command to simulate..." autocomplete="off">
+                                <button class="btn btn-secondary" id="btn-sim-send">
+                                    <i class="fa-solid fa-paper-plane"></i>
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
-                    <!-- Simulator Input -->
-                    <div class="voice-simulator-box">
-                        <label for="sim-input">Voice Command Simulator</label>
-                        <div class="input-group">
-                            <input type="text" id="sim-input" placeholder="Type a voice command to simulate..." autocomplete="off">
-                            <button class="btn btn-secondary" id="btn-sim-send">
-                                <i class="fa-solid fa-paper-plane"></i>
-                            </button>
+                    <!-- Voice Event Log -->
+                    <div class="log-container">
+                        <h3>Command Activity History</h3>
+                        <div class="log-list" id="log-list-container">
+                            <div class="empty-logs">
+                                <i class="fa-solid fa-list-check"></i>
+                                <p>No voice commands captured yet.</p>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Voice Event Log -->
-                <div class="log-container">
-                    <h3>Command Activity History</h3>
-                    <div class="log-list" id="log-list-container">
-                        <div class="empty-logs">
-                            <i class="fa-solid fa-list-check"></i>
-                            <p>No voice commands captured yet.</p>
+                <!-- Tab Content 2: Chat Mode -->
+                <div id="tab-chat-content" class="tab-content">
+                    <div class="chat-container">
+                        <!-- Scrollable Message list -->
+                        <div class="chat-messages" id="chat-messages-container">
+                            <div class="chat-welcome">
+                                <i class="fa-solid fa-wand-magic-sparkles animate-pulse-slow"></i>
+                                <h4>Chat with AetherHome</h4>
+                                <p>Ask questions or type commands like: "Can you turn on the desk lamp?"</p>
+                            </div>
+                        </div>
+                        
+                        <!-- Typing state indicator -->
+                        <div class="chat-typing-indicator" id="chat-typing-indicator" style="display: none;">
+                            <span></span><span></span><span></span> AetherHome is typing...
+                        </div>
+
+                        <!-- Chat input bar -->
+                        <div class="chat-input-bar">
+                            <div class="input-group">
+                                <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off">
+                                <button class="btn btn-primary" id="btn-chat-send">
+                                    <i class="fa-solid fa-arrow-up"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -162,7 +201,6 @@
                 <div class="settings-section">
                     <h4>Local LLM Server (Ollama)</h4>
                     <div class="server-status-card" id="ollama-status-container">
-                        <!-- Dynamic Server status -->
                         <div class="status-row">
                             <span class="status-label">Service Health:</span>
                             <div class="status-val text-muted"><i class="fa-solid fa-circle-question"></i> Checking...</div>
