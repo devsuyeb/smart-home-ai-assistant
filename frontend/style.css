@@ -13,7 +13,9 @@
     --text-muted: #9aa8b6;
     
     --success: #00ff88;
+    --success-glow: rgba(0, 255, 136, 0.35);
     --warning: #ffb700;
+    --warning-glow: rgba(255, 183, 0, 0.3);
     --error: #ff3b30;
     
     --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -108,7 +110,7 @@ body {
 /* Status pills */
 .system-status-pills {
     display: flex;
-    gap: 1rem;
+    gap: 0.8rem;
     align-items: center;
 }
 
@@ -133,19 +135,19 @@ body {
 
 .pulse-indicator.green {
     background-color: var(--success);
-    box-shadow: 0 0 8px var(--success);
+    box-shadow: 0 0 8px var(--success-glow);
     animation: pulse 1.5s infinite;
 }
 
 .pulse-indicator.orange {
     background-color: var(--warning);
-    box-shadow: 0 0 8px var(--warning);
+    box-shadow: 0 0 8px var(--warning-glow);
     animation: pulse 1.5s infinite;
 }
 
 .pulse-indicator.red {
     background-color: var(--error);
-    box-shadow: 0 0 8px var(--error);
+    box-shadow: 0 0 8px rgba(255, 59, 48, 0.4);
     animation: pulse 1.5s infinite;
 }
 
@@ -702,8 +704,8 @@ input:checked + .slider:before {
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(5, 6, 8, 0.8);
-    backdrop-filter: blur(8px);
+    background: rgba(5, 6, 8, 0.85);
+    backdrop-filter: blur(10px);
     z-index: 100;
     display: flex;
     align-items: center;
@@ -734,6 +736,224 @@ input:checked + .slider:before {
     transform: translateY(0);
 }
 
+/* Settings Modal Specifics */
+.modal-card.settings-card {
+    max-width: 680px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    padding: 2.2rem;
+}
+
+.settings-content {
+    overflow-y: auto;
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    padding-right: 0.25rem;
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.settings-section h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-main);
+    border-left: 3px solid var(--primary);
+    padding-left: 0.6rem;
+    font-family: 'Outfit', sans-serif;
+}
+
+.section-desc {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: -0.5rem;
+}
+
+/* Server Status Card */
+.server-status-card {
+    background: rgba(255,255,255,0.015);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+}
+
+.status-row .status-label {
+    color: var(--text-muted);
+}
+
+.status-row .status-val {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.server-actions-row {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    padding-top: 0.8rem;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.8rem;
+}
+
+/* Model Cards List */
+.models-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.model-card-item {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    padding: 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    transition: var(--transition-smooth);
+    position: relative;
+}
+
+.model-card-item:hover {
+    background: rgba(255,255,255,0.035);
+    border-color: rgba(255,255,255,0.1);
+}
+
+.model-card-item.model-active {
+    border-color: rgba(0, 255, 136, 0.3);
+    box-shadow: 0 0 15px rgba(0, 255, 136, 0.05);
+    background: rgba(0, 255, 136, 0.01);
+}
+
+.model-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex-grow: 1;
+}
+
+.model-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.model-title-row h5 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.model-badge-active {
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--success);
+    background: rgba(0, 255, 136, 0.1);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 255, 136, 0.2);
+}
+
+.model-desc {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.3;
+    max-width: 420px;
+}
+
+.model-size-tag {
+    font-size: 0.7rem;
+    font-family: monospace;
+    background: rgba(255,255,255,0.05);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    color: var(--text-muted);
+}
+
+.model-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.btn-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--glass-border);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: var(--transition-smooth);
+}
+
+.btn-icon:hover {
+    color: var(--error);
+    background: rgba(255, 59, 48, 0.1);
+    border-color: rgba(255, 59, 48, 0.2);
+}
+
+/* Progress Bar Components */
+.progress-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    width: 100%;
+    margin-top: 0.4rem;
+}
+
+.progress-label-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.progress-bar-container {
+    height: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    overflow: hidden;
+    position: relative;
+    border: 1px solid rgba(255,255,255,0.02);
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--primary), var(--secondary));
+    border-radius: 10px;
+    transition: width 0.4s ease;
+    box-shadow: 0 0 10px var(--primary-glow);
+}
+
+/* Alert Texts */
+.text-success { color: var(--success); text-shadow: 0 0 8px var(--success-glow); }
+.text-warning { color: var(--warning); text-shadow: 0 0 8px var(--warning-glow); }
+.text-error { color: var(--error); text-shadow: 0 0 8px rgba(255, 59, 48, 0.3); }
+
+/* Modal Header and Forms */
 .modal-header {
     display: flex;
     justify-content: space-between;

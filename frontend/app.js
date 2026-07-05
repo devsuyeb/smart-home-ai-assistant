@@ -1,7 +1,7 @@
 // DOM Elements
 const wsStatusPill = document.getElementById('ws-status-pill');
 const listenerStatusPill = document.getElementById('listener-status-pill');
-const geminiStatusPill = document.getElementById('gemini-status-pill');
+const activeLlmPill = document.getElementById('active-llm-pill');
 const devicesContainer = document.getElementById('devices-container');
 const voiceWaveContainer = document.getElementById('voice-wave-container');
 const liveTranscriptText = document.getElementById('live-transcript-text');
@@ -9,18 +9,54 @@ const simInput = document.getElementById('sim-input');
 const btnSimSend = document.getElementById('btn-sim-send');
 const logListContainer = document.getElementById('log-list-container');
 
-// Modal Elements
+// Modal: Add Device
 const btnAddDevice = document.getElementById('btn-add-device');
 const addDeviceModal = document.getElementById('add-device-modal');
-const btnCloseModal = document.getElementById('btn-close-modal');
-const btnCancelModal = document.getElementById('btn-cancel-modal');
 const addDeviceForm = document.getElementById('add-device-form');
+
+// Modal: Settings & LLM Manager
+const btnOpenSettings = document.getElementById('btn-open-settings');
+const settingsModal = document.getElementById('settings-modal');
+const ollamaStatusContainer = document.getElementById('ollama-status-container');
+const modelsListContainer = document.getElementById('models-list-container');
 
 // State
 let socket = null;
 let devices = {};
 let voiceLogs = [];
+let localModels = []; // Installed models on Ollama
+let llmState = {
+    binary_installed: false,
+    service_running: false,
+    status: 'Not Installed',
+    install_percent: 0,
+    active_model: null,
+    pulling_model: null,
+    pull_percent: 0
+};
 const apiBase = `${window.location.protocol}//${window.location.host}`;
+
+// Target Models configuration
+const PRECONFIGURED_MODELS = [
+    {
+        tag: 'gemma3:1b',
+        displayName: 'Gemma 3 1B',
+        size: 'approx. 800 MB',
+        desc: "Google's ultra-lightweight and highly efficient model, perfect for micro-devices and quick local tasks."
+    },
+    {
+        tag: 'qwen2.5:1.5b',
+        displayName: 'Qwen 2.5 1.5B',
+        size: 'approx. 900 MB',
+        desc: "Alibaba's advanced small language model, offering exceptional language understanding and JSON formatting."
+    },
+    {
+        tag: 'tinyllama:1.1b',
+        displayName: 'TinyLlama 1.1B',
+        size: 'approx. 600 MB',
+        desc: "A compact 1.1B model pre-trained on 3 trillion tokens, designed for extreme speed and low memory footprints."
+    }
+];
 
 // ----------------- WebSocket Connection -----------------
 
@@ -46,7 +82,13 @@ function connectWebSocket() {
                 devices = message.data.devices;
                 voiceLogs = message.data.voice_logs;
                 updateVoiceListenerStatus(message.data.listener_status);
-                updateGeminiStatus(message.data.gemini_active);
+                
+                if (message.data.llm) {
+                    llmState = message.data.llm;
+                    updateLlmPill(llmState.active_model);
+                    refreshLLMSettingsUI();
+                }
+                
                 renderDevices();
                 renderVoiceLogs();
                 break;
@@ -63,6 +105,49 @@ function connectWebSocket() {
             case 'listener_status':
                 updateVoiceListenerStatus(message.data);
                 break;
+            case 'ollama_install':
+                llmState.status = message.data.status;
+                if (message.data.percent !== undefined) {
+                    llmState.install_percent = message.data.percent;
+                }
+                if (llmState.status === 'Running') {
+                    llmState.service_running = true;
+                    llmState.binary_installed = true;
+                    fetchLLMData();
+                }
+                renderOllamaStatus();
+                break;
+            case 'model_pull':
+                if (message.data.status === 'downloading') {
+                    llmState.pulling_model = message.data.model;
+                    llmState.pull_percent = message.data.percent;
+                } else if (message.data.status === 'success') {
+                    llmState.pulling_model = null;
+                    llmState.pull_percent = 0;
+                    if (message.data.active_model) {
+                        llmState.active_model = message.data.active_model;
+                    }
+                    fetchLLMData(); // Refresh list
+                } else if (message.data.status === 'failed') {
+                    alert(`Failed to pull model: ${message.data.error}`);
+                    llmState.pulling_model = null;
+                    llmState.pull_percent = 0;
+                    fetchLLMData();
+                }
+                updateLlmPill(llmState.active_model);
+                renderModelsList();
+                break;
+            case 'model_deleted':
+                if (llmState.active_model === message.data.model) {
+                    llmState.active_model = null;
+                }
+                fetchLLMData();
+                break;
+            case 'model_switched':
+                llmState.active_model = message.data.active_model;
+                updateLlmPill(llmState.active_model);
+                renderModelsList();
+                break;
             default:
                 break;
         }
@@ -71,12 +156,7 @@ function connectWebSocket() {
     socket.onclose = () => {
         updateWsStatus('offline', 'Server: Offline');
         updateVoiceListenerStatus('Stopped');
-        // Try to reconnect every 3 seconds
         setTimeout(connectWebSocket, 3000);
-    };
-    
-    socket.onerror = (err) => {
-        console.error('WebSocket error:', err);
     };
 }
 
@@ -122,22 +202,20 @@ function updateVoiceListenerStatus(status) {
     }
 }
 
-function updateGeminiStatus(active) {
-    const label = geminiStatusPill.querySelector('.status-label');
-    if (active) {
-        geminiStatusPill.classList.add('active');
-        label.textContent = 'AI: Gemini 2.5';
-        geminiStatusPill.style.color = 'var(--primary)';
-        geminiStatusPill.style.borderColor = 'rgba(0, 240, 255, 0.2)';
+function updateLlmPill(activeModel) {
+    const label = activeLlmPill.querySelector('.status-label');
+    if (activeModel) {
+        label.textContent = `LLM: ${activeModel.split(':')[0]}`;
+        activeLlmPill.style.color = 'var(--primary)';
+        activeLlmPill.style.borderColor = 'rgba(0, 240, 255, 0.2)';
     } else {
-        geminiStatusPill.classList.remove('active');
-        label.textContent = 'AI: Offline';
-        geminiStatusPill.style.color = 'var(--text-muted)';
-        geminiStatusPill.style.borderColor = 'var(--glass-border)';
+        label.textContent = 'LLM: Rule-based';
+        activeLlmPill.style.color = 'var(--text-muted)';
+        activeLlmPill.style.borderColor = 'var(--glass-border)';
     }
 }
 
-// ----------------- Rendering -----------------
+// ----------------- Rendering Dashboard -----------------
 
 function renderDevices() {
     devicesContainer.innerHTML = '';
@@ -159,7 +237,6 @@ function renderDevices() {
         const isActive = device.state === 'on';
         const isOnline = device.online;
         
-        // Pick proper icon
         let iconClass = 'fa-solid fa-power-off';
         if (device.type === 'smart_plug') iconClass = 'fa-solid fa-plug';
         if (device.type === 'rgb_led') iconClass = 'fa-solid fa-lightbulb';
@@ -210,7 +287,7 @@ function renderVoiceLogs() {
     }
     
     voiceLogs.forEach(log => {
-        const isSuccess = log.status === 'Success';
+        const isSuccess = log.status.startsWith('Success');
         const item = document.createElement('div');
         item.className = 'log-item';
         item.innerHTML = `
@@ -227,8 +304,7 @@ function renderVoiceLogs() {
 function triggerVisualCommandAlert(log) {
     liveTranscriptText.textContent = `"${log.phrase}"`;
     
-    // Flash text green/cyan on success
-    if (log.status === 'Success') {
+    if (log.status.startsWith('Success')) {
         liveTranscriptText.style.color = 'var(--primary)';
         setTimeout(() => {
             liveTranscriptText.style.color = '';
@@ -241,7 +317,146 @@ function triggerVisualCommandAlert(log) {
     }
 }
 
-// ----------------- Actions -----------------
+// ----------------- Rendering LLM Settings Modal -----------------
+
+function refreshLLMSettingsUI() {
+    renderOllamaStatus();
+    renderModelsList();
+}
+
+function renderOllamaStatus() {
+    let healthText = '';
+    let actionButtons = '';
+    
+    if (llmState.status === 'Running') {
+        healthText = `<span class="text-success"><span class="pulse-indicator green" style="margin-right: 5px;"></span> Active & Running</span>`;
+        actionButtons = `<span class="device-ip">Port: 11434 (Local)</span>`;
+    } else if (llmState.status === 'Stopped') {
+        healthText = `<span class="text-warning"><i class="fa-solid fa-circle-pause"></i> Stopped</span>`;
+        actionButtons = `<button class="btn btn-secondary btn-sm" onclick="startOllamaService()">Start Service</button>`;
+    } else if (llmState.status.startsWith('Downloading')) {
+        healthText = `<span class="text-warning"><i class="fa-solid fa-spinner fa-spin"></i> Downloading Binary...</span>`;
+        actionButtons = `
+            <div class="progress-wrapper" style="width: 100%;">
+                <div class="progress-label-row">
+                    <span>Downloading Ollama ARM64 package</span>
+                    <span>${llmState.install_percent}%</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" style="width: ${llmState.install_percent}%"></div>
+                </div>
+            </div>
+        `;
+    } else if (llmState.status === 'Extracting') {
+        healthText = `<span class="text-warning"><i class="fa-solid fa-spinner fa-spin"></i> Extracting Files...</span>`;
+        actionButtons = `
+            <div class="progress-wrapper" style="width: 100%;">
+                <div class="progress-label-row">
+                    <span>Unpacking files (tar & zstd)</span>
+                    <span>Please wait...</span>
+                </div>
+                <div class="progress-bar-container">
+                    <div class="progress-bar-fill" style="width: 100%"></div>
+                </div>
+            </div>
+        `;
+    } else if (llmState.status === 'Failed' || llmState.status === 'Failed to Start') {
+        healthText = `<span class="text-error"><i class="fa-solid fa-triangle-exclamation"></i> Startup Failed</span>`;
+        actionButtons = `<button class="btn btn-primary btn-sm" onclick="installOllamaService()">Retry Installation</button>`;
+    } else { // Not Installed
+        healthText = `<span class="text-muted"><i class="fa-solid fa-ban"></i> Not Installed</span>`;
+        actionButtons = `<button class="btn btn-primary btn-sm" onclick="installOllamaService()"><i class="fa-solid fa-download"></i> Install Ollama (ARM64)</button>`;
+    }
+    
+    ollamaStatusContainer.innerHTML = `
+        <div class="status-row">
+            <span class="status-label">Service Health:</span>
+            <div class="status-val">${healthText}</div>
+        </div>
+        <div class="server-actions-row">
+            ${actionButtons}
+        </div>
+    `;
+}
+
+function renderModelsList() {
+    modelsListContainer.innerHTML = '';
+    
+    if (llmState.status !== 'Running') {
+        modelsListContainer.innerHTML = `
+            <div class="loading-state">
+                <i class="fa-solid fa-server"></i>
+                <p>Ollama server must be active and running to manage models.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    PRECONFIGURED_MODELS.forEach(model => {
+        // Check if model is downloaded
+        const installed = localModels.some(m => m.name === model.tag || m.name.split(':')[0] === model.tag.split(':')[0]);
+        const isActive = llmState.active_model && (llmState.active_model === model.tag || llmState.active_model.split(':')[0] === model.tag.split(':')[0]);
+        const isPulling = llmState.pulling_model === model.tag;
+        
+        const card = document.createElement('div');
+        card.className = `model-card-item ${isActive ? 'model-active' : ''}`;
+        
+        let actionMarkup = '';
+        if (isPulling) {
+            actionMarkup = `
+                <div class="progress-wrapper" style="min-width: 140px;">
+                    <div class="progress-label-row">
+                        <span>Pulling...</span>
+                        <span>${llmState.pull_percent}%</span>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" style="width: ${llmState.pull_percent}%"></div>
+                    </div>
+                </div>
+            `;
+        } else if (installed) {
+            if (isActive) {
+                actionMarkup = `
+                    <span class="model-badge-active"><i class="fa-solid fa-check"></i> Active</span>
+                    <button class="btn-icon" title="Remove Model" onclick="deleteModel('${model.tag}')">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                `;
+            } else {
+                actionMarkup = `
+                    <button class="btn btn-secondary btn-sm" onclick="switchModel('${model.tag}')">Activate</button>
+                    <button class="btn-icon" title="Remove Model" onclick="deleteModel('${model.tag}')">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                `;
+            }
+        } else {
+            // Disable button if another pull is active
+            const pullDisabled = llmState.pulling_model !== null;
+            actionMarkup = `
+                <button class="btn btn-primary btn-sm" ${pullDisabled ? 'disabled' : ''} onclick="pullModel('${model.tag}')">
+                    <i class="fa-solid fa-download"></i> Pull (${model.size})
+                </button>
+            `;
+        }
+        
+        card.innerHTML = `
+            <div class="model-details">
+                <div class="model-title-row">
+                    <h5>${escapeHtml(model.displayName)}</h5>
+                    <span class="model-size-tag">${escapeHtml(model.tag)}</span>
+                </div>
+                <p class="model-desc">${escapeHtml(model.desc)}</p>
+            </div>
+            <div class="model-actions">
+                ${actionMarkup}
+            </div>
+        `;
+        modelsListContainer.appendChild(card);
+    });
+}
+
+// ----------------- API Calls: Devices -----------------
 
 async function toggleDevice(id, state) {
     try {
@@ -253,7 +468,6 @@ async function toggleDevice(id, state) {
         console.log('Toggled device status:', data);
     } catch (err) {
         console.error(err);
-        // Revert toggle visually if failed
         renderDevices();
     }
 }
@@ -283,27 +497,140 @@ async function simulateVoiceCommand() {
         const response = await fetch(`${apiBase}/api/simulate-voice?command=${encodeURIComponent(text)}`, {
             method: 'POST'
         });
-        if (!response.ok) throw new Error('Simulation endpoint returned error');
+        if (!response.ok) throw new Error('Simulation failed');
     } catch (err) {
         console.error(err);
         liveTranscriptText.textContent = "Simulation failed";
     }
 }
 
-// ----------------- Modal Event Handlers -----------------
+// ----------------- API Calls: Local LLM -----------------
 
-btnAddDevice.addEventListener('click', () => {
-    addDeviceModal.classList.add('active');
-    document.getElementById('device-id').focus();
-});
-
-function closeModal() {
-    addDeviceModal.classList.remove('active');
-    addDeviceForm.reset();
+async function fetchLLMData() {
+    try {
+        // Fetch health status
+        const statusRes = await fetch(`${apiBase}/api/llm/status`);
+        if (statusRes.ok) {
+            llmState = await statusRes.json();
+            updateLlmPill(llmState.active_model);
+        }
+        
+        // Fetch model list
+        if (llmState.service_running) {
+            const modelsRes = await fetch(`${apiBase}/api/llm/models`);
+            if (modelsRes.ok) {
+                localModels = await modelsRes.json();
+            }
+        } else {
+            localModels = [];
+        }
+        
+        refreshLLMSettingsUI();
+    } catch (err) {
+        console.error('Error fetching LLM data:', err);
+    }
 }
 
-btnCloseModal.addEventListener('click', closeModal);
-btnCancelModal.addEventListener('click', closeModal);
+async function installOllamaService() {
+    try {
+        const response = await fetch(`${apiBase}/api/llm/install`, { method: 'POST' });
+        if (!response.ok) throw new Error('Failed to trigger installation');
+        const data = await response.json();
+        console.log('Installation triggered:', data);
+        fetchLLMData();
+    } catch (err) {
+        alert(`Error starting install: ${err.message}`);
+    }
+}
+
+async function startOllamaService() {
+    try {
+        const response = await fetch(`${apiBase}/api/llm/start`, { method: 'POST' });
+        if (!response.ok) throw new Error('Failed to start service');
+        const data = await response.json();
+        console.log('Service started:', data);
+        fetchLLMData();
+    } catch (err) {
+        alert(`Error starting service: ${err.message}`);
+    }
+}
+
+async function pullModel(modelName) {
+    try {
+        const response = await fetch(`${apiBase}/api/llm/pull`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName })
+        });
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to pull model');
+        }
+        console.log(`Pull started for: ${modelName}`);
+        fetchLLMData();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function deleteModel(modelName) {
+    if (!confirm(`Are you sure you want to delete the model "${modelName}"? This will free up storage.`)) return;
+    
+    try {
+        const response = await fetch(`${apiBase}/api/llm/models/${encodeURIComponent(modelName)}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) throw new Error('Failed to delete model');
+        console.log(`Deleted model: ${modelName}`);
+        fetchLLMData();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function switchModel(modelName) {
+    try {
+        const response = await fetch(`${apiBase}/api/llm/switch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName })
+        });
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to activate model');
+        }
+        console.log(`Switched to active model: ${modelName}`);
+        fetchLLMData();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+// ----------------- Modals Toggles & Overlay Hooks -----------------
+
+function openModal(modalId) {
+    const modal = document.getElementById(modalId);
+    if (modal) {
+        modal.classList.add('active');
+        if (modalId === 'settings-modal') {
+            fetchLLMData();
+        }
+    }
+}
+
+function closeModal(modalId) {
+    const modal = document.getElementById(modalId);
+    if (modal) {
+        modal.classList.remove('active');
+        if (modalId === 'add-device-modal') {
+            addDeviceForm.reset();
+        }
+    }
+}
+
+// Event Bindings
+btnOpenSettings.addEventListener('click', () => openModal('settings-modal'));
+btnAddDevice.addEventListener('click', () => openModal('add-device-modal'));
 
 addDeviceForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -325,13 +652,12 @@ addDeviceForm.addEventListener('submit', async (e) => {
             throw new Error(errData.detail || 'Failed to add device');
         }
         
-        closeModal();
+        closeModal('add-device-modal');
     } catch (err) {
         alert(err.message);
     }
 });
 
-// Simulate voice on button or Enter press
 btnSimSend.addEventListener('click', simulateVoiceCommand);
 simInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') simulateVoiceCommand();
@@ -347,5 +673,7 @@ function escapeHtml(str) {
               .replace(/'/g, "&#039;");
 }
 
-// Start
+// Initialize
 connectWebSocket();
+// Initial fetch of LLM settings
+setTimeout(fetchLLMData, 1000);

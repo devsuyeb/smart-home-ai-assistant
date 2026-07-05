@@ -1,11 +1,14 @@
 import os
+import sys
 import asyncio
 import json
 import logging
 import threading
+import subprocess
 import requests
-from typing import Dict, List, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import shutil
+from typing import Dict, List, Any, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -29,13 +32,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Simulated/Registered ESP devices database
-# In a real app, this can be saved to a JSON file or SQLite
+# Constants & Paths
+BASE_DIR = "/home/phablet/smart-home-assistant"
+BIN_DIR = os.path.join(BASE_DIR, "bin")
+OLLAMA_PATH = os.path.join(BIN_DIR, "ollama")
+OLLAMA_URL = "https://ollama.com/download/ollama-linux-arm64.tar.zst"
+
+# Databases (In-Memory)
 DEVICES: Dict[str, Dict[str, Any]] = {
     "esp-living-room": {
         "id": "esp-living-room",
         "name": "Living Room Light",
-        "ip": "192.168.1.100", # Example IP, user can change it
+        "ip": "192.168.1.100",
         "state": "off",
         "type": "relay_switch",
         "online": False
@@ -50,18 +58,29 @@ DEVICES: Dict[str, Dict[str, Any]] = {
     }
 }
 
-# WebSocket connections storage
 connected_clients: List[WebSocket] = []
-
-# Voice command status log (to display on the web UI)
 VOICE_LOGS: List[Dict[str, Any]] = []
+
+# LLM State Variables
+ACTIVE_LOCAL_MODEL: Optional[str] = None
+OLLAMA_PROCESS: Optional[subprocess.Popen] = None
+OLLAMA_INSTALL_STATUS = "Not Installed" # "Not Installed", "Downloading X%", "Extracting", "Running", "Failed"
+OLLAMA_INSTALL_PERCENT = 0
+CURRENT_PULLING_MODEL: Optional[str] = None
+CURRENT_PULL_PERCENT = 0
 
 class DeviceUpdate(BaseModel):
     name: str
     ip: str
     type: str
 
-# ----------------- Helper Functions & Connection broadcast -----------------
+class ModelPullRequest(BaseModel):
+    model_name: str
+
+class ModelSwitchRequest(BaseModel):
+    model_name: str
+
+# ----------------- Helper: Broadcast to WebSockets -----------------
 
 async def broadcast_status(event_type: str, data: Any):
     """Broadcast real-time status updates to all connected web dashboards."""
@@ -88,17 +107,15 @@ def log_voice_command(phrase: str, intent: str, status: str):
     if len(VOICE_LOGS) > 50:
         VOICE_LOGS.pop(0)
     
-    # Run broadcast in thread-safe loop
     try:
         loop = asyncio.get_running_loop()
         asyncio.run_coroutine_threadsafe(broadcast_status("voice_log", log_item), loop)
     except RuntimeError:
         pass
 
-# ----------------- Device Control Logic -----------------
+# ----------------- ESP Module Controls -----------------
 
 def send_esp_toggle(device_id: str, state: bool) -> bool:
-    """Send HTTP toggle command to the ESP module."""
     device = DEVICES.get(device_id)
     if not device:
         return False
@@ -108,13 +125,11 @@ def send_esp_toggle(device_id: str, state: bool) -> bool:
     
     logger.info(f"Sending toggle {state_str} to device {device_id} at {url}")
     try:
-        # 2-second timeout to avoid blocking backend
         response = requests.get(url, timeout=2)
         if response.status_code == 200:
             device["state"] = "on" if state else "off"
             device["online"] = True
             
-            # Broadcast the updated device list
             try:
                 loop = asyncio.get_running_loop()
                 asyncio.run_coroutine_threadsafe(broadcast_status("devices", DEVICES), loop)
@@ -123,7 +138,7 @@ def send_esp_toggle(device_id: str, state: bool) -> bool:
             return True
     except requests.exceptions.RequestException as e:
         logger.warning(f"Failed to communicate with ESP {device_id}: {e}")
-        # Mark as offline but toggle local simulation state just for UI testing
+        # Toggle local simulation state for testing dashboard
         device["online"] = False
         device["state"] = "on" if state else "off"
         try:
@@ -133,14 +148,271 @@ def send_esp_toggle(device_id: str, state: bool) -> bool:
             pass
     return False
 
-# ----------------- Voice Command Processor -----------------
+# ----------------- Ollama Background Management -----------------
+
+def check_ollama_binary() -> bool:
+    return os.path.exists(OLLAMA_PATH)
+
+def is_ollama_running() -> bool:
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=1)
+        return r.status_code == 200
+    except requests.RequestException:
+        return False
+
+def start_ollama_service():
+    global OLLAMA_PROCESS, OLLAMA_INSTALL_STATUS
+    if is_ollama_running():
+        OLLAMA_INSTALL_STATUS = "Running"
+        logger.info("Ollama is already running.")
+        return True
+    
+    if not check_ollama_binary():
+        OLLAMA_INSTALL_STATUS = "Not Installed"
+        return False
+        
+    OLLAMA_INSTALL_STATUS = "Starting"
+    logger.info("Launching Ollama service process...")
+    try:
+        # Launch Ollama serve in the background
+        env = os.environ.copy()
+        env["OLLAMA_HOST"] = "0.0.0.0:11434"
+        # Store models locally in user directory
+        env["OLLAMA_MODELS"] = os.path.join(BASE_DIR, ".ollama", "models")
+        os.makedirs(env["OLLAMA_MODELS"], exist_ok=True)
+        
+        OLLAMA_PROCESS = subprocess.Popen(
+            [OLLAMA_PATH, "serve"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        # Give it a couple of seconds to spin up
+        for _ in range(5):
+            if is_ollama_running():
+                OLLAMA_INSTALL_STATUS = "Running"
+                logger.info("Ollama service successfully started.")
+                return True
+            threading.Event().wait(1)
+            
+        OLLAMA_INSTALL_STATUS = "Failed to Start"
+        logger.error("Ollama service failed to bind to port 11434.")
+    except Exception as e:
+        OLLAMA_INSTALL_STATUS = "Failed to Start"
+        logger.error(f"Failed to execute Ollama serve: {e}")
+    return False
+
+def bg_install_ollama(loop):
+    global OLLAMA_INSTALL_STATUS, OLLAMA_INSTALL_PERCENT
+    OLLAMA_INSTALL_STATUS = "Downloading"
+    OLLAMA_INSTALL_PERCENT = 0
+    
+    archive_path = "/tmp/ollama-linux-arm64.tar.zst"
+    logger.info(f"Downloading Ollama binary from {OLLAMA_URL}...")
+    
+    try:
+        # Download with progress updates
+        with requests.get(OLLAMA_URL, stream=True) as r:
+            r.raise_for_status()
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(archive_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024): # 1MB chunks
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = int((downloaded / total_size) * 100)
+                            if percent != OLLAMA_INSTALL_PERCENT:
+                                OLLAMA_INSTALL_PERCENT = percent
+                                OLLAMA_INSTALL_STATUS = f"Downloading {percent}%"
+                                asyncio.run_coroutine_threadsafe(
+                                    broadcast_status("ollama_install", {
+                                        "status": OLLAMA_INSTALL_STATUS,
+                                        "percent": OLLAMA_INSTALL_PERCENT
+                                    }), loop
+                                )
+        
+        logger.info("Download completed. Decompressing package...")
+        OLLAMA_INSTALL_STATUS = "Extracting"
+        OLLAMA_INSTALL_PERCENT = 100
+        asyncio.run_coroutine_threadsafe(
+            broadcast_status("ollama_install", {
+                "status": OLLAMA_INSTALL_STATUS,
+                "percent": OLLAMA_INSTALL_PERCENT
+            }), loop
+        )
+        
+        # Create output directories
+        os.makedirs(BIN_DIR, exist_ok=True)
+        
+        # Decompress using system tar and zstd (which we verified is installed!)
+        # Since the tarball contains 'bin/ollama' and potentially other libs, we extract it directly into the BASE_DIR
+        # base dir is /home/phablet/smart-home-assistant, so extracting here creates bin/ollama.
+        cmd = f"tar --zstd -xf {archive_path} -C {BASE_DIR}"
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        
+        if res.returncode != 0:
+            raise Exception(f"Tar extraction failed: {res.stderr}")
+            
+        logger.info("Extraction completed. Starting service...")
+        
+        # Cleanup downloaded file
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+            
+        success = start_ollama_service()
+        if success:
+            logger.info("Ollama is successfully set up and running!")
+        
+        # Broadcast final status
+        asyncio.run_coroutine_threadsafe(
+            broadcast_status("ollama_install", {
+                "status": OLLAMA_INSTALL_STATUS,
+                "percent": OLLAMA_INSTALL_PERCENT
+            }), loop
+        )
+        
+    except Exception as e:
+        logger.error(f"Ollama installation failed: {e}")
+        OLLAMA_INSTALL_STATUS = "Failed"
+        asyncio.run_coroutine_threadsafe(
+            broadcast_status("ollama_install", {
+                "status": OLLAMA_INSTALL_STATUS,
+                "error": str(e)
+            }), loop
+        )
+
+# ----------------- Model Pull Manager -----------------
+
+def bg_pull_model(model_name: str, loop):
+    global CURRENT_PULLING_MODEL, CURRENT_PULL_PERCENT
+    CURRENT_PULLING_MODEL = model_name
+    CURRENT_PULL_PERCENT = 0
+    
+    logger.info(f"Starting pull for model: {model_name}")
+    try:
+        url = "http://localhost:11434/api/pull"
+        r = requests.post(url, json={"name": model_name}, stream=True, timeout=1200)
+        r.raise_for_status()
+        
+        for line in r.iter_lines():
+            if line:
+                data = json.loads(line)
+                status = data.get("status", "")
+                completed = data.get("completed", 0)
+                total = data.get("total", 0)
+                
+                if status == "downloading" and total > 0:
+                    percent = int((completed / total) * 100)
+                    if percent != CURRENT_PULL_PERCENT:
+                        CURRENT_PULL_PERCENT = percent
+                        asyncio.run_coroutine_threadsafe(
+                            broadcast_status("model_pull", {
+                                "model": model_name,
+                                "status": "downloading",
+                                "percent": percent
+                            }), loop
+                        )
+                elif status == "success":
+                    logger.info(f"Model {model_name} successfully downloaded.")
+                    
+        # Pull finished successfully
+        CURRENT_PULLING_MODEL = None
+        CURRENT_PULL_PERCENT = 0
+        
+        # Auto-switch to this model if it's the first one downloaded
+        global ACTIVE_LOCAL_MODEL
+        if not ACTIVE_LOCAL_MODEL:
+            ACTIVE_LOCAL_MODEL = model_name
+            
+        asyncio.run_coroutine_threadsafe(
+            broadcast_status("model_pull", {
+                "model": model_name,
+                "status": "success",
+                "active_model": ACTIVE_LOCAL_MODEL
+            }), loop
+        )
+    except Exception as e:
+        logger.error(f"Failed to pull model {model_name}: {e}")
+        CURRENT_PULLING_MODEL = None
+        CURRENT_PULL_PERCENT = 0
+        asyncio.run_coroutine_threadsafe(
+            broadcast_status("model_pull", {
+                "model": model_name,
+                "status": "failed",
+                "error": str(e)
+            }), loop
+        )
+
+# ----------------- Voice Command Parser (AI & Fallback) -----------------
 
 def parse_intent_and_execute(text: str):
-    """Parse text from voice input and run matching commands."""
     text_lower = text.lower()
     logger.info(f"Processing command: '{text}'")
     
-    # 1. Check for AI / Gemini override if API key is provided
+    # 1. Local LLM Intent Processing (Ollama)
+    if ACTIVE_LOCAL_MODEL and is_ollama_running():
+        try:
+            logger.info(f"Using local LLM ({ACTIVE_LOCAL_MODEL}) to parse command...")
+            prompt = (
+                f"You are a smart home parser. Below is a list of registered smart home devices:\n"
+                f"{json.dumps(DEVICES, indent=2)}\n\n"
+                f"The user said: '{text}'\n\n"
+                f"Instructions:\n"
+                f"Match the user's intent to one of the registered devices and decide whether they want to turn it 'on' or 'off'.\n"
+                f"If the request does not match any device, set target_device and action to null.\n"
+                f"Respond ONLY with a raw JSON block containing exactly these keys:\n"
+                f"{{\n"
+                f"  \"target_device\": \"device_id or null\",\n"
+                f"  \"action\": \"on or off or null\",\n"
+                f"  \"explanation\": \"short explanation of why you performed this action\"\n"
+                f"}}\n"
+                f"Do not add any markdown formatting, code blocks, or preamble. Just raw JSON."
+            )
+            
+            # Request to local Ollama instance
+            url = "http://localhost:11434/api/generate"
+            payload = {
+                "model": ACTIVE_LOCAL_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.1 # Low temperature for structural consistency
+                }
+            }
+            r = requests.post(url, json=payload, timeout=10)
+            
+            if r.status_code == 200:
+                raw_response = r.json().get("response", "").strip()
+                logger.info(f"Ollama raw response: {raw_response}")
+                
+                # Cleanup potential markdown ticks if model ignored instructions
+                if raw_response.startswith("```"):
+                    start = raw_response.find("{")
+                    end = raw_response.rfind("}")
+                    if start != -1 and end != -1:
+                        raw_response = raw_response[start:end+1]
+                
+                res_data = json.loads(raw_response)
+                target = res_data.get("target_device")
+                action = res_data.get("action")
+                explanation = res_data.get("explanation", "")
+                
+                if target in DEVICES and action in ["on", "off"]:
+                    state_bool = (action == "on")
+                    send_esp_toggle(target, state_bool)
+                    log_voice_command(text, f"LLM ({ACTIVE_LOCAL_MODEL}): {action.upper()} {target} - {explanation}", "Success")
+                    return
+                else:
+                    logger.info(f"Ollama parsed command but found no valid match: {target} -> {action}")
+            else:
+                logger.warning(f"Ollama API returned non-200 code: {r.status_code}")
+        except Exception as e:
+            logger.error(f"Local LLM parsing failed: {e}")
+
+    # 2. Cloud AI (Gemini) fallback
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key:
         try:
@@ -159,7 +431,6 @@ def parse_intent_and_execute(text: str):
                 model='gemini-2.5-flash',
                 contents=prompt,
             )
-            # Simple extract JSON block
             raw_text = response.text
             start = raw_text.find("{")
             end = raw_text.rfind("}")
@@ -170,21 +441,18 @@ def parse_intent_and_execute(text: str):
                 if target in DEVICES and action in ["on", "off"]:
                     state_bool = (action == "on")
                     send_esp_toggle(target, state_bool)
-                    log_voice_command(text, f"AI Action: {action.upper()} {target}", "Success")
+                    log_voice_command(text, f"Cloud AI: {action.upper()} {target}", "Success")
                     return
         except Exception as e:
-            logger.error(f"Gemini intent parsing failed, falling back to rule-based: {e}")
+            logger.error(f"Gemini intent parsing failed: {e}")
 
-    # 2. Rule-based Intent Matching (Fallback or Default)
+    # 3. Rule-based Intent Matching (Fallback or Default)
     matched = False
-    
-    # Match keywords for ON / OFF
     is_on = any(x in text_lower for x in ["turn on", "switch on", "enable", "start", "open"])
     is_off = any(x in text_lower for x in ["turn off", "switch off", "disable", "stop", "close"])
     
     for device_id, device in DEVICES.items():
         name_lower = device["name"].lower()
-        # Check if user mentioned the device name
         if name_lower in text_lower or device_id.replace("esp-", "").replace("-", " ") in text_lower:
             if is_on:
                 send_esp_toggle(device_id, True)
@@ -202,7 +470,6 @@ def parse_intent_and_execute(text: str):
         log_voice_command(text, "Unknown Intent", "No Device Match")
 
 # ----------------- Voice Listener Thread -----------------
-# We put this in a separate thread so it doesn't block the FastAPI web server.
 
 VOICE_LISTENER_STATUS = "Stopped"
 
@@ -215,7 +482,6 @@ def start_voice_listener(loop):
         import speech_recognition as sr
         recognizer = sr.Recognizer()
         
-        # Try to open the default microphone
         try:
             mic = sr.Microphone()
             with mic as source:
@@ -228,55 +494,40 @@ def start_voice_listener(loop):
             run_voice_simulation_loop()
             return
 
-        # Main active microphone listening loop
         while VOICE_LISTENER_STATUS == "Listening":
             try:
                 with mic as source:
-                    logger.info("Waiting for speech...")
-                    # Timeout of 5 seconds, phrase limit of 7 seconds
                     audio = recognizer.listen(source, timeout=5, phrase_time_limit=7)
-                
-                logger.info("Speech detected, transcribing...")
-                # We default to Sphinx (offline) or Google Speech recognition (free online)
                 try:
-                    # Use Google's free online API wrapper
                     command_text = recognizer.recognize_google(audio)
                     parse_intent_and_execute(command_text)
                 except sr.UnknownValueError:
-                    logger.debug("Speech recognition could not understand audio")
+                    pass
                 except sr.RequestError as e:
-                    logger.warning(f"Could not request results from Google Speech Recognition service; {e}")
-                    # Try offline fallback using pocket sphinx if available
                     try:
                         command_text = recognizer.recognize_sphinx(audio)
                         parse_intent_and_execute(command_text)
                     except Exception as offline_err:
-                        logger.error(f"Offline speech recognition fallback failed: {offline_err}")
+                        logger.error(f"Offline STT failed: {offline_err}")
             except sr.WaitTimeoutError:
-                # Normal timeout when no speech is detected
                 continue
             except Exception as e:
-                logger.error(f"Error in microphone capture loop: {e}")
-                await_sleep_seconds = 2
-                threading.Event().wait(await_sleep_seconds)
+                logger.error(f"Error in mic loop: {e}")
+                threading.Event().wait(2)
 
     except ImportError:
         VOICE_LISTENER_STATUS = "Error: Missing Speech Libraries"
-        logger.error("speech_recognition or pyaudio is not installed. Voice listener running in simulation mode.")
+        logger.error("speech_recognition or pyaudio missing. Running in simulation mode.")
         run_voice_simulation_loop()
 
 def run_voice_simulation_loop():
-    """Helper to simulate voice command capability if mic is missing or imports fail."""
     global VOICE_LISTENER_STATUS
     if "Error:" not in VOICE_LISTENER_STATUS:
         VOICE_LISTENER_STATUS = "Simulation Mode"
-    logger.info("Voice Simulation Loop active. You can type commands in the dashboard UI.")
-    
-    # Just run a simple keep-alive thread
     while "Error" not in VOICE_LISTENER_STATUS and VOICE_LISTENER_STATUS != "Stopped":
         threading.Event().wait(10)
 
-# ----------------- FastAPI Routes -----------------
+# ----------------- FastAPI Routes: System and Devices -----------------
 
 @app.get("/api/status")
 async def get_system_status():
@@ -318,8 +569,6 @@ async def delete_device(device_id: str):
 async def toggle_device(device_id: str, state: bool):
     if device_id not in DEVICES:
         raise HTTPException(status_code=404, detail="Device not found")
-    
-    # Run in a background executor to not block async loop
     success = await asyncio.to_thread(send_esp_toggle, device_id, state)
     return {"id": device_id, "state": DEVICES[device_id]["state"], "success": success}
 
@@ -329,33 +578,181 @@ async def get_voice_logs():
 
 @app.post("/api/simulate-voice")
 async def simulate_voice(command: str):
-    """Simulates a voice command input from the web dashboard."""
     parse_intent_and_execute(command)
     return {"status": "processed", "command": command}
 
-# ----------------- WebSockets -----------------
+# ----------------- FastAPI Routes: Local LLM (Ollama) Management -----------------
+
+@app.get("/api/llm/status")
+async def get_llm_status():
+    global OLLAMA_INSTALL_STATUS, ACTIVE_LOCAL_MODEL
+    
+    binary_present = check_ollama_binary()
+    running = is_ollama_running()
+    
+    if running:
+        OLLAMA_INSTALL_STATUS = "Running"
+    elif binary_present:
+        if OLLAMA_INSTALL_STATUS not in ["Starting", "Failed to Start"]:
+            OLLAMA_INSTALL_STATUS = "Stopped"
+    else:
+        OLLAMA_INSTALL_STATUS = "Not Installed"
+        
+    return {
+        "binary_installed": binary_present,
+        "service_running": running,
+        "status": OLLAMA_INSTALL_STATUS,
+        "install_percent": OLLAMA_INSTALL_PERCENT,
+        "active_model": ACTIVE_LOCAL_MODEL,
+        "pulling_model": CURRENT_PULLING_MODEL,
+        "pull_percent": CURRENT_PULL_PERCENT
+    }
+
+@app.post("/api/llm/install")
+async def install_llm_service(background_tasks: BackgroundTasks):
+    global OLLAMA_INSTALL_STATUS
+    if OLLAMA_INSTALL_STATUS in ["Downloading", "Extracting"]:
+        return {"status": "in_progress", "detail": OLLAMA_INSTALL_STATUS}
+    
+    if is_ollama_running():
+        return {"status": "running", "detail": "Ollama is already running"}
+        
+    # Start download/install background thread
+    loop = asyncio.get_event_loop()
+    background_tasks.add_task(bg_install_ollama, loop)
+    return {"status": "started", "detail": "Ollama installation triggered in background."}
+
+@app.post("/api/llm/start")
+async def start_llm_service_endpoint():
+    success = start_ollama_service()
+    if success:
+        return {"status": "success", "detail": "Ollama service started."}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to start Ollama service. Make sure it is installed.")
+
+@app.get("/api/llm/models")
+async def list_llm_models():
+    """Retrieve installed models from local Ollama service."""
+    if not is_ollama_running():
+        return []
+    
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            models_list = r.json().get("models", [])
+            return models_list
+    except Exception as e:
+        logger.error(f"Failed to fetch local models: {e}")
+        
+    return []
+
+@app.post("/api/llm/pull")
+async def pull_llm_model(payload: ModelPullRequest, background_tasks: BackgroundTasks):
+    if not is_ollama_running():
+        raise HTTPException(status_code=503, detail="Ollama service is not running")
+        
+    global CURRENT_PULLING_MODEL
+    if CURRENT_PULLING_MODEL:
+        raise HTTPException(status_code=409, detail=f"Already pulling model: {CURRENT_PULLING_MODEL}")
+        
+    loop = asyncio.get_event_loop()
+    background_tasks.add_task(bg_pull_model, payload.model_name, loop)
+    return {"status": "started", "model": payload.model_name}
+
+@app.delete("/api/llm/models/{model_name}")
+async def delete_llm_model(model_name: str):
+    if not is_ollama_running():
+        raise HTTPException(status_code=503, detail="Ollama service is not running")
+        
+    try:
+        url = "http://localhost:11434/api/delete"
+        r = requests.delete(url, json={"name": model_name}, timeout=10)
+        if r.status_code == 200:
+            # If deleted the active model, clear it
+            global ACTIVE_LOCAL_MODEL
+            if ACTIVE_LOCAL_MODEL == model_name:
+                ACTIVE_LOCAL_MODEL = None
+                
+            await broadcast_status("model_deleted", {"model": model_name})
+            return {"status": "success", "deleted": model_name}
+        else:
+            raise HTTPException(status_code=r.status_code, detail="Ollama failed to delete model")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/llm/switch")
+async def switch_active_model(payload: ModelSwitchRequest):
+    global ACTIVE_LOCAL_MODEL
+    
+    # Verify the model is actually installed
+    if not is_ollama_running():
+        raise HTTPException(status_code=503, detail="Ollama service is not running")
+        
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        models = [m.get("name") for m in r.json().get("models", [])]
+        
+        # Exact match or tagless match
+        matched_model = None
+        for m in models:
+            if m == payload.model_name or m.split(":")[0] == payload.model_name:
+                matched_model = m
+                break
+                
+        if not matched_model and payload.model_name != "":
+            raise HTTPException(status_code=404, detail="Model is not installed. Please pull it first.")
+            
+        ACTIVE_LOCAL_MODEL = matched_model
+        await broadcast_status("model_switched", {"active_model": ACTIVE_LOCAL_MODEL})
+        return {"status": "success", "active_model": ACTIVE_LOCAL_MODEL}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ----------------- WebSockets Connection Handler -----------------
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     
-    # Send initial state
+    # Send initial state including LLM details
     try:
+        # Check LLM status at moment of websocket handshake
+        binary_present = check_ollama_binary()
+        running = is_ollama_running()
+        
+        global OLLAMA_INSTALL_STATUS
+        if running:
+            OLLAMA_INSTALL_STATUS = "Running"
+        elif binary_present:
+            if OLLAMA_INSTALL_STATUS not in ["Starting", "Failed to Start"]:
+                OLLAMA_INSTALL_STATUS = "Stopped"
+        else:
+            OLLAMA_INSTALL_STATUS = "Not Installed"
+
         await websocket.send_text(json.dumps({
             "type": "init",
             "data": {
                 "devices": DEVICES,
                 "voice_logs": VOICE_LOGS,
                 "listener_status": VOICE_LISTENER_STATUS,
-                "gemini_active": os.getenv("GEMINI_API_KEY") is not None
+                "gemini_active": os.getenv("GEMINI_API_KEY") is not None,
+                "llm": {
+                    "binary_installed": binary_present,
+                    "service_running": running,
+                    "status": OLLAMA_INSTALL_STATUS,
+                    "install_percent": OLLAMA_INSTALL_PERCENT,
+                    "active_model": ACTIVE_LOCAL_MODEL,
+                    "pulling_model": CURRENT_PULLING_MODEL,
+                    "pull_percent": CURRENT_PULL_PERCENT
+                }
             }
         }))
         
         while True:
-            # Keep connection open and listen for messages
-            data = await websocket.receive_text()
-            # Handle client-sent messages if any
+            await websocket.receive_text()
     except WebSocketDisconnect:
         if websocket in connected_clients:
             connected_clients.remove(websocket)
@@ -364,20 +761,25 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in connected_clients:
             connected_clients.remove(websocket)
 
-# ----------------- Serve Frontend -----------------
+# ----------------- Serve Frontend Static Files -----------------
 
-# Mount static files folder
 frontend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
 if os.path.exists(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 else:
-    logger.warning(f"Frontend directory not found at {frontend_dir}. APIs will work but dashboard won't be served.")
+    logger.warning(f"Frontend directory not found at {frontend_dir}.")
 
-# Startup handler to launch voice listening thread
+# Startup lifecycle: Launch listener thread and auto-start Ollama if binary is present
 @app.on_event("startup")
 async def startup_event():
     loop = asyncio.get_event_loop()
+    
+    # Start microphone voice listener
     threading.Thread(target=start_voice_listener, args=(loop,), daemon=True).start()
+    
+    # Auto-start Ollama if binary exists
+    if check_ollama_binary():
+        threading.Thread(target=start_ollama_service, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
