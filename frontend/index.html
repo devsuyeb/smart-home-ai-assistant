@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AetherHome | Smart AI Assistant</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        
+        <!-- Header -->
+        <header class="main-header">
+            <div class="logo">
+                <i class="fa-solid fa-wand-magic-sparkles brand-icon"></i>
+                <div class="logo-text">
+                    <h1>AETHER<span>HOME</span></h1>
+                    <p>AI Voice Assistant Hub</p>
+                </div>
+            </div>
+            <div class="system-status-pills">
+                <div class="status-pill" id="listener-status-pill">
+                    <span class="pulse-indicator orange"></span>
+                    <span class="status-label">Voice: Checking...</span>
+                </div>
+                <div class="status-pill" id="gemini-status-pill">
+                    <i class="fa-solid fa-brain"></i>
+                    <span class="status-label">AI: Offline</span>
+                </div>
+                <div class="status-pill" id="ws-status-pill">
+                    <span class="pulse-indicator red"></span>
+                    <span class="status-label">Server: Offline</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Grid Layout -->
+        <main class="main-content">
+            
+            <!-- Left Panel: Devices -->
+            <section class="panel-section devices-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-microchip"></i> Smart ESP Modules</h2>
+                    <button class="btn btn-primary btn-sm" id="btn-add-device">
+                        <i class="fa-solid fa-plus"></i> Add Device
+                    </button>
+                </div>
+
+                <!-- Devices Grid -->
+                <div class="devices-grid" id="devices-container">
+                    <!-- Dynamic Devices go here -->
+                    <div class="loading-state">
+                        <i class="fa-solid fa-spinner fa-spin"></i>
+                        <p>Connecting to device registry...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Voice Control & Console -->
+            <section class="panel-section voice-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-microphone-lines animate-pulse-slow"></i> Voice Assistant console</h2>
+                </div>
+
+                <!-- Voice Commands Visualizer / Input Simulator -->
+                <div class="voice-hero">
+                    <div class="voice-waves" id="voice-wave-container">
+                        <div class="wave wave1"></div>
+                        <div class="wave wave2"></div>
+                        <div class="wave wave3"></div>
+                        <div class="wave wave4"></div>
+                        <i class="fa-solid fa-microphone mic-inner-icon"></i>
+                    </div>
+                    
+                    <div class="assistant-prompt-text">
+                        <p class="guide-text">Say commands like: <span>"Turn on Living Room Light"</span></p>
+                        <p class="live-transcript" id="live-transcript-text">Waiting for voice input...</p>
+                    </div>
+
+                    <!-- Simulator Input -->
+                    <div class="voice-simulator-box">
+                        <label for="sim-input">Voice Command Simulator</label>
+                        <div class="input-group">
+                            <input type="text" id="sim-input" placeholder="Type a voice command to simulate..." autocomplete="off">
+                            <button class="btn btn-secondary" id="btn-sim-send">
+                                <i class="fa-solid fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Voice Event Log -->
+                <div class="log-container">
+                    <h3>Command Activity History</h3>
+                    <div class="log-list" id="log-list-container">
+                        <div class="empty-logs">
+                            <i class="fa-solid fa-list-check"></i>
+                            <p>No voice commands captured yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Modal: Add Device -->
+    <div class="modal-overlay" id="add-device-modal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Add New ESP Module</h3>
+                <button class="modal-close" id="btn-close-modal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <form id="add-device-form" class="modal-form">
+                <div class="form-group">
+                    <label for="device-id">Device Unique ID (e.g. esp-relay-1)</label>
+                    <input type="text" id="device-id" required placeholder="esp-relay-1">
+                </div>
+                <div class="form-group">
+                    <label for="device-name">Display Name (e.g. Desk Lamp)</label>
+                    <input type="text" id="device-name" required placeholder="Desk Lamp">
+                </div>
+                <div class="form-group">
+                    <label for="device-ip">IP Address of ESP Module</label>
+                    <input type="text" id="device-ip" required placeholder="192.168.1.15">
+                </div>
+                <div class="form-group">
+                    <label for="device-type">Device Type</label>
+                    <select id="device-type">
+                        <option value="relay_switch">Relay Switch (On/Off)</option>
+                        <option value="smart_plug">Smart Plug (On/Off)</option>
+                        <option value="rgb_led">RGB LED (On/Off)</option>
+                    </select>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-link" id="btn-cancel-modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Device</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
