@@ -544,8 +544,13 @@ async function installOllamaService() {
         const data = await response.json();
         console.log('Installation triggered:', data);
         
-        // Wait 1 second before fetching status to allow backend thread to spin up and set status to "Downloading"
-        setTimeout(fetchLLMData, 1000);
+        // Instantly transition to downloading state in UI to avoid latency confusion
+        llmState.status = 'Downloading 0%';
+        llmState.install_percent = 0;
+        renderOllamaStatus();
+        
+        // Wait 1.5 seconds before fetching status to allow backend thread to set up
+        setTimeout(fetchLLMData, 1500);
     } catch (err) {
         alert(`Error starting install: ${err.message}`);
         fetchLLMData();
@@ -576,9 +581,16 @@ async function pullModel(modelName) {
             throw new Error(data.detail || 'Failed to pull model');
         }
         console.log(`Pull started for: ${modelName}`);
-        fetchLLMData();
+        
+        // Instantly show pulling state in UI
+        llmState.pulling_model = modelName;
+        llmState.pull_percent = 0;
+        renderModelsList();
+        
+        setTimeout(fetchLLMData, 1500);
     } catch (err) {
         alert(err.message);
+        fetchLLMData();
     }
 }
 
