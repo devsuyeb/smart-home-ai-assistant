@@ -533,13 +533,22 @@ async function fetchLLMData() {
 
 async function installOllamaService() {
     try {
+        const btn = document.querySelector('.server-actions-row button');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Triggering Install...`;
+        }
+        
         const response = await fetch(`${apiBase}/api/llm/install`, { method: 'POST' });
         if (!response.ok) throw new Error('Failed to trigger installation');
         const data = await response.json();
         console.log('Installation triggered:', data);
-        fetchLLMData();
+        
+        // Wait 1 second before fetching status to allow backend thread to spin up and set status to "Downloading"
+        setTimeout(fetchLLMData, 1000);
     } catch (err) {
         alert(`Error starting install: ${err.message}`);
+        fetchLLMData();
     }
 }
 

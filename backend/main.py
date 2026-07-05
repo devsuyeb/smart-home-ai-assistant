@@ -611,13 +611,14 @@ async def get_llm_status():
 @app.post("/api/llm/install")
 async def install_llm_service(background_tasks: BackgroundTasks):
     global OLLAMA_INSTALL_STATUS
-    if OLLAMA_INSTALL_STATUS in ["Downloading", "Extracting"]:
+    if OLLAMA_INSTALL_STATUS in ["Downloading", "Extracting"] or OLLAMA_INSTALL_STATUS.startswith("Downloading"):
         return {"status": "in_progress", "detail": OLLAMA_INSTALL_STATUS}
     
     if is_ollama_running():
         return {"status": "running", "detail": "Ollama is already running"}
         
-    # Start download/install background thread
+    # Start download/install background thread immediately blocking other calls
+    OLLAMA_INSTALL_STATUS = "Downloading 0%"
     loop = asyncio.get_event_loop()
     background_tasks.add_task(bg_install_ollama, loop)
     return {"status": "started", "detail": "Ollama installation triggered in background."}
