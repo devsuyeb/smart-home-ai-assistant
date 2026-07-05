@@ -445,6 +445,7 @@ function renderModelsList() {
         } else if (installed) {
             if (isActive) {
                 actionMarkup = `
+                    <button class="btn btn-secondary btn-sm" onclick="deactivateModel()"><i class="fa-solid fa-power-off"></i> Deactivate</button>
                     <span class="model-badge-active"><i class="fa-solid fa-check"></i> Active</span>
                     <button class="btn-icon" title="Remove Model" onclick="deleteModel('${model.tag}')">
                         <i class="fa-solid fa-trash-can"></i>
@@ -649,6 +650,24 @@ async function switchModel(modelName) {
             throw new Error(data.detail || 'Failed to activate model');
         }
         console.log(`Switched to active model: ${modelName}`);
+        fetchLLMData();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function deactivateModel() {
+    try {
+        const response = await fetch(`${apiBase}/api/llm/switch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: "" })
+        });
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to deactivate model');
+        }
+        console.log('Model deactivated successfully');
         fetchLLMData();
     } catch (err) {
         alert(err.message);

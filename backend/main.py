@@ -769,6 +769,7 @@ async def switch_active_model(payload: ModelSwitchRequest):
         if not matched_model and payload.model_name != "":
             raise HTTPException(status_code=404, detail="Model is not installed. Please pull it first.")
             
+        old_model = ACTIVE_LOCAL_MODEL
         ACTIVE_LOCAL_MODEL = matched_model
         await broadcast_status("model_switched", {"active_model": ACTIVE_LOCAL_MODEL})
         
@@ -782,6 +783,17 @@ async def switch_active_model(payload: ModelSwitchRequest):
                 except Exception as ex:
                     logger.warning(f"Failed to preload model {ACTIVE_LOCAL_MODEL}: {ex}")
             threading.Thread(target=preload, daemon=True).start()
+        # If deactivating, tell Ollama to unload the model from memory to free up RAM!
+        elif old_model:
+            def unload():
+                try:
+                    logger.info(f"Unloading model {old_model} from Ollama RAM...")
+                    # Loading with keep_alive=0 unloads it
+                    requests.post("http://localhost:11434/api/generate", json={"model": old_model, "keep_alive": 0}, timeout=5)
+                    logger.info(f"Model {old_model} successfully unloaded from RAM.")
+                except Exception as ex:
+                    logger.warning(f"Failed to unload model {old_model}: {ex}")
+            threading.Thread(target=unload, daemon=True).start()
             
         return {"status": "success", "active_model": ACTIVE_LOCAL_MODEL}
     except HTTPException:
