@@ -110,6 +110,8 @@ function connectWebSocket() {
                 if (message.data.percent !== undefined) {
                     llmState.install_percent = message.data.percent;
                 }
+                llmState.install_speed = message.data.speed || "";
+                llmState.install_eta = message.data.eta || "";
                 if (llmState.status === 'Running') {
                     llmState.service_running = true;
                     llmState.binary_installed = true;
@@ -121,9 +123,13 @@ function connectWebSocket() {
                 if (message.data.status === 'downloading') {
                     llmState.pulling_model = message.data.model;
                     llmState.pull_percent = message.data.percent;
+                    llmState.pull_speed = message.data.speed || "";
+                    llmState.pull_eta = message.data.eta || "";
                 } else if (message.data.status === 'success') {
                     llmState.pulling_model = null;
                     llmState.pull_percent = 0;
+                    llmState.pull_speed = "";
+                    llmState.pull_eta = "";
                     if (message.data.active_model) {
                         llmState.active_model = message.data.active_model;
                     }
@@ -132,6 +138,8 @@ function connectWebSocket() {
                     alert(`Failed to pull model: ${message.data.error}`);
                     llmState.pulling_model = null;
                     llmState.pull_percent = 0;
+                    llmState.pull_speed = "";
+                    llmState.pull_eta = "";
                     fetchLLMData();
                 }
                 updateLlmPill(llmState.active_model);
@@ -335,15 +343,19 @@ function renderOllamaStatus() {
         healthText = `<span class="text-warning"><i class="fa-solid fa-circle-pause"></i> Stopped</span>`;
         actionButtons = `<button class="btn btn-secondary btn-sm" onclick="startOllamaService()">Start Service</button>`;
     } else if (llmState.status.startsWith('Downloading')) {
+        const speedSuffix = llmState.install_speed ? ` @ ${llmState.install_speed}` : '';
         healthText = `<span class="text-warning"><i class="fa-solid fa-spinner fa-spin"></i> Downloading Binary...</span>`;
         actionButtons = `
             <div class="progress-wrapper" style="width: 100%;">
                 <div class="progress-label-row">
-                    <span>Downloading Ollama ARM64 package</span>
+                    <span>Downloading Ollama ARM64 package${speedSuffix}</span>
                     <span>${llmState.install_percent}%</span>
                 </div>
                 <div class="progress-bar-container">
                     <div class="progress-bar-fill" style="width: ${llmState.install_percent}%"></div>
+                </div>
+                <div class="progress-label-row" style="margin-top: 2px; font-size: 0.7rem; opacity: 0.85;">
+                    <span>Time remaining: ${llmState.install_eta || 'Calculating...'}</span>
                 </div>
             </div>
         `;
@@ -403,14 +415,19 @@ function renderModelsList() {
         
         let actionMarkup = '';
         if (isPulling) {
+            const speedSuffix = llmState.pull_speed ? ` @ ${llmState.pull_speed}` : '';
             actionMarkup = `
-                <div class="progress-wrapper" style="min-width: 140px;">
+                <div class="progress-wrapper" style="min-width: 180px;">
                     <div class="progress-label-row">
-                        <span>Pulling...</span>
+                        <span>Pulling${speedSuffix}</span>
                         <span>${llmState.pull_percent}%</span>
                     </div>
                     <div class="progress-bar-container">
                         <div class="progress-bar-fill" style="width: ${llmState.pull_percent}%"></div>
+                    </div>
+                    <div class="progress-label-row" style="margin-top: 2px; font-size: 0.7rem; opacity: 0.85; justify-content: flex-start; gap: 4px;">
+                        <span>Time remaining:</span>
+                        <span>${llmState.pull_eta || 'Calculating...'}</span>
                     </div>
                 </div>
             `;

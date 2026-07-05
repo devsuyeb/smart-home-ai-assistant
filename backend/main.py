@@ -7,6 +7,7 @@ import threading
 import subprocess
 import requests
 import shutil
+import time
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -64,10 +65,16 @@ VOICE_LOGS: List[Dict[str, Any]] = []
 # LLM State Variables
 ACTIVE_LOCAL_MODEL: Optional[str] = None
 OLLAMA_PROCESS: Optional[subprocess.Popen] = None
-OLLAMA_INSTALL_STATUS = "Not Installed" # "Not Installed", "Downloading X%", "Extracting", "Running", "Failed"
+
+OLLAMA_INSTALL_STATUS = "Not Installed"
 OLLAMA_INSTALL_PERCENT = 0
+OLLAMA_INSTALL_SPEED = ""
+OLLAMA_INSTALL_ETA = ""
+
 CURRENT_PULLING_MODEL: Optional[str] = None
 CURRENT_PULL_PERCENT = 0
+CURRENT_PULL_SPEED = ""
+CURRENT_PULL_ETA = ""
 
 class DeviceUpdate(BaseModel):
     name: str
@@ -79,6 +86,27 @@ class ModelPullRequest(BaseModel):
 
 class ModelSwitchRequest(BaseModel):
     model_name: str
+
+# ----------------- Helper: Speed & ETA Formatting -----------------
+
+def format_speed(bytes_per_sec: float) -> str:
+    if bytes_per_sec >= 1024 * 1024:
+        return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+    elif bytes_per_sec >= 1024:
+        return f"{bytes_per_sec / 1024:.0f} KB/s"
+    else:
+        return f"{bytes_per_sec:.0f} B/s"
+
+def format_eta(seconds: float) -> str:
+    if seconds <= 0:
+        return "Calculating..."
+    mins, secs = divmod(int(seconds), 60)
+    hours, mins = divmod(mins, 60)
+    if hours > 0:
+        return f"{hours:d}h {mins:d}m"
+    if mins > 0:
+        return f"{mins:d}m {secs:d}s"
+    return f"{secs:d}s"
 
 # ----------------- Helper: Broadcast to WebSockets -----------------
 
@@ -174,10 +202,8 @@ def start_ollama_service():
     OLLAMA_INSTALL_STATUS = "Starting"
     logger.info("Launching Ollama service process...")
     try:
-        # Launch Ollama serve in the background
         env = os.environ.copy()
         env["OLLAMA_HOST"] = "0.0.0.0:11434"
-        # Store models locally in user directory
         env["OLLAMA_MODELS"] = os.path.join(BASE_DIR, ".ollama", "models")
         os.makedirs(env["OLLAMA_MODELS"], exist_ok=True)
         
@@ -187,7 +213,6 @@ def start_ollama_service():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        # Give it a couple of seconds to spin up
         for _ in range(5):
             if is_ollama_running():
                 OLLAMA_INSTALL_STATUS = "Running"
@@ -203,15 +228,17 @@ def start_ollama_service():
     return False
 
 def bg_install_ollama(loop):
-    global OLLAMA_INSTALL_STATUS, OLLAMA_INSTALL_PERCENT
-    OLLAMA_INSTALL_STATUS = "Downloading"
+    global OLLAMA_INSTALL_STATUS, OLLAMA_INSTALL_PERCENT, OLLAMA_INSTALL_SPEED, OLLAMA_INSTALL_ETA
+    OLLAMA_INSTALL_STATUS = "Downloading 0%"
     OLLAMA_INSTALL_PERCENT = 0
+    OLLAMA_INSTALL_SPEED = ""
+    OLLAMA_INSTALL_ETA = ""
     
     archive_path = "/tmp/ollama-linux-arm64.tar.zst"
     logger.info(f"Downloading Ollama binary from {OLLAMA_URL}...")
     
     try:
-        # Download with progress updates
+        start_time = time.time()
         with requests.get(OLLAMA_URL, stream=True) as r:
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
@@ -224,15 +251,26 @@ def bg_install_ollama(loop):
                         downloaded += len(chunk)
                         if total_size > 0:
                             percent = int((downloaded / total_size) * 100)
-                            if percent != OLLAMA_INSTALL_PERCENT:
-                                OLLAMA_INSTALL_PERCENT = percent
-                                OLLAMA_INSTALL_STATUS = f"Downloading {percent}%"
-                                asyncio.run_coroutine_threadsafe(
-                                    broadcast_status("ollama_install", {
-                                        "status": OLLAMA_INSTALL_STATUS,
-                                        "percent": OLLAMA_INSTALL_PERCENT
-                                    }), loop
-                                )
+                            percent = max(percent, OLLAMA_INSTALL_PERCENT)
+                            OLLAMA_INSTALL_PERCENT = percent
+                            OLLAMA_INSTALL_STATUS = f"Downloading {percent}%"
+                            
+                            elapsed = time.time() - start_time
+                            if elapsed > 0:
+                                speed_val = downloaded / elapsed
+                                OLLAMA_INSTALL_SPEED = format_speed(speed_val)
+                                remaining = total_size - downloaded
+                                eta_val = remaining / speed_val if speed_val > 0 else 0
+                                OLLAMA_INSTALL_ETA = format_eta(eta_val)
+                            
+                            asyncio.run_coroutine_threadsafe(
+                                broadcast_status("ollama_install", {
+                                    "status": OLLAMA_INSTALL_STATUS,
+                                    "percent": OLLAMA_INSTALL_PERCENT,
+                                    "speed": OLLAMA_INSTALL_SPEED,
+                                    "eta": OLLAMA_INSTALL_ETA
+                                }), loop
+                            )
         
         logger.info("Download completed. Decompressing package...")
         OLLAMA_INSTALL_STATUS = "Extracting"
@@ -244,12 +282,7 @@ def bg_install_ollama(loop):
             }), loop
         )
         
-        # Create output directories
         os.makedirs(BIN_DIR, exist_ok=True)
-        
-        # Decompress using system tar and zstd (which we verified is installed!)
-        # Since the tarball contains 'bin/ollama' and potentially other libs, we extract it directly into the BASE_DIR
-        # base dir is /home/phablet/smart-home-assistant, so extracting here creates bin/ollama.
         cmd = f"tar --zstd -xf {archive_path} -C {BASE_DIR}"
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
@@ -257,8 +290,6 @@ def bg_install_ollama(loop):
             raise Exception(f"Tar extraction failed: {res.stderr}")
             
         logger.info("Extraction completed. Starting service...")
-        
-        # Cleanup downloaded file
         if os.path.exists(archive_path):
             os.remove(archive_path)
             
@@ -266,7 +297,6 @@ def bg_install_ollama(loop):
         if success:
             logger.info("Ollama is successfully set up and running!")
         
-        # Broadcast final status
         asyncio.run_coroutine_threadsafe(
             broadcast_status("ollama_install", {
                 "status": OLLAMA_INSTALL_STATUS,
@@ -287,9 +317,11 @@ def bg_install_ollama(loop):
 # ----------------- Model Pull Manager -----------------
 
 def bg_pull_model(model_name: str, loop):
-    global CURRENT_PULLING_MODEL, CURRENT_PULL_PERCENT
+    global CURRENT_PULLING_MODEL, CURRENT_PULL_PERCENT, CURRENT_PULL_SPEED, CURRENT_PULL_ETA
     CURRENT_PULLING_MODEL = model_name
     CURRENT_PULL_PERCENT = 0
+    CURRENT_PULL_SPEED = ""
+    CURRENT_PULL_ETA = ""
     
     logger.info(f"Starting pull for model: {model_name}")
     try:
@@ -297,32 +329,61 @@ def bg_pull_model(model_name: str, loop):
         r = requests.post(url, json={"name": model_name}, stream=True, timeout=1200)
         r.raise_for_status()
         
+        pull_start_time = time.time()
+        completed_by_digest = {}
+        total_by_digest = {}
+        
         for line in r.iter_lines():
             if line:
                 data = json.loads(line)
                 status = data.get("status", "")
                 completed = data.get("completed", 0)
                 total = data.get("total", 0)
+                digest = data.get("digest", "")
                 
-                if status == "downloading" and total > 0:
-                    percent = int((completed / total) * 100)
-                    if percent != CURRENT_PULL_PERCENT:
-                        CURRENT_PULL_PERCENT = percent
-                        asyncio.run_coroutine_threadsafe(
-                            broadcast_status("model_pull", {
-                                "model": model_name,
-                                "status": "downloading",
-                                "percent": percent
-                            }), loop
-                        )
+                # Sum layers progress to ensure monotonic percentage increments
+                if digest and (status == "downloading" or completed == total):
+                    completed_by_digest[digest] = completed
+                    if total > 0:
+                        total_by_digest[digest] = total
+                
+                total_completed = sum(completed_by_digest.values())
+                total_expected = sum(total_by_digest.values())
+                
+                if total_expected > 0:
+                    percent = int((total_completed / total_expected) * 100)
+                    percent = max(percent, CURRENT_PULL_PERCENT)
+                    # Cap at 99% until success is confirmed by response
+                    if percent > 99:
+                        percent = 99
+                    CURRENT_PULL_PERCENT = percent
+                    
+                    elapsed = time.time() - pull_start_time
+                    if elapsed > 0:
+                        speed_val = total_completed / elapsed
+                        CURRENT_PULL_SPEED = format_speed(speed_val)
+                        remaining = total_expected - total_completed
+                        eta_val = remaining / speed_val if speed_val > 0 else 0
+                        CURRENT_PULL_ETA = format_eta(eta_val)
+                        
+                    asyncio.run_coroutine_threadsafe(
+                        broadcast_status("model_pull", {
+                            "model": model_name,
+                            "status": "downloading",
+                            "percent": CURRENT_PULL_PERCENT,
+                            "speed": CURRENT_PULL_SPEED,
+                            "eta": CURRENT_PULL_ETA
+                        }), loop
+                    )
                 elif status == "success":
                     logger.info(f"Model {model_name} successfully downloaded.")
                     
         # Pull finished successfully
         CURRENT_PULLING_MODEL = None
         CURRENT_PULL_PERCENT = 0
+        CURRENT_PULL_SPEED = ""
+        CURRENT_PULL_ETA = ""
         
-        # Auto-switch to this model if it's the first one downloaded
         global ACTIVE_LOCAL_MODEL
         if not ACTIVE_LOCAL_MODEL:
             ACTIVE_LOCAL_MODEL = model_name
@@ -338,6 +399,8 @@ def bg_pull_model(model_name: str, loop):
         logger.error(f"Failed to pull model {model_name}: {e}")
         CURRENT_PULLING_MODEL = None
         CURRENT_PULL_PERCENT = 0
+        CURRENT_PULL_SPEED = ""
+        CURRENT_PULL_ETA = ""
         asyncio.run_coroutine_threadsafe(
             broadcast_status("model_pull", {
                 "model": model_name,
@@ -372,14 +435,13 @@ def parse_intent_and_execute(text: str):
                 f"Do not add any markdown formatting, code blocks, or preamble. Just raw JSON."
             )
             
-            # Request to local Ollama instance
             url = "http://localhost:11434/api/generate"
             payload = {
                 "model": ACTIVE_LOCAL_MODEL,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
-                    "temperature": 0.1 # Low temperature for structural consistency
+                    "temperature": 0.1
                 }
             }
             r = requests.post(url, json=payload, timeout=10)
@@ -388,7 +450,6 @@ def parse_intent_and_execute(text: str):
                 raw_response = r.json().get("response", "").strip()
                 logger.info(f"Ollama raw response: {raw_response}")
                 
-                # Cleanup potential markdown ticks if model ignored instructions
                 if raw_response.startswith("```"):
                     start = raw_response.find("{")
                     end = raw_response.rfind("}")
@@ -603,9 +664,13 @@ async def get_llm_status():
         "service_running": running,
         "status": OLLAMA_INSTALL_STATUS,
         "install_percent": OLLAMA_INSTALL_PERCENT,
+        "install_speed": OLLAMA_INSTALL_SPEED,
+        "install_eta": OLLAMA_INSTALL_ETA,
         "active_model": ACTIVE_LOCAL_MODEL,
         "pulling_model": CURRENT_PULLING_MODEL,
-        "pull_percent": CURRENT_PULL_PERCENT
+        "pull_percent": CURRENT_PULL_PERCENT,
+        "pull_speed": CURRENT_PULL_SPEED,
+        "pull_eta": CURRENT_PULL_ETA
     }
 
 @app.post("/api/llm/install")
@@ -617,7 +682,6 @@ async def install_llm_service(background_tasks: BackgroundTasks):
     if is_ollama_running():
         return {"status": "running", "detail": "Ollama is already running"}
         
-    # Start download/install background thread immediately blocking other calls
     OLLAMA_INSTALL_STATUS = "Downloading 0%"
     loop = asyncio.get_event_loop()
     background_tasks.add_task(bg_install_ollama, loop)
@@ -633,7 +697,6 @@ async def start_llm_service_endpoint():
 
 @app.get("/api/llm/models")
 async def list_llm_models():
-    """Retrieve installed models from local Ollama service."""
     if not is_ollama_running():
         return []
     
@@ -669,7 +732,6 @@ async def delete_llm_model(model_name: str):
         url = "http://localhost:11434/api/delete"
         r = requests.delete(url, json={"name": model_name}, timeout=10)
         if r.status_code == 200:
-            # If deleted the active model, clear it
             global ACTIVE_LOCAL_MODEL
             if ACTIVE_LOCAL_MODEL == model_name:
                 ACTIVE_LOCAL_MODEL = None
@@ -685,7 +747,6 @@ async def delete_llm_model(model_name: str):
 async def switch_active_model(payload: ModelSwitchRequest):
     global ACTIVE_LOCAL_MODEL
     
-    # Verify the model is actually installed
     if not is_ollama_running():
         raise HTTPException(status_code=503, detail="Ollama service is not running")
         
@@ -693,7 +754,6 @@ async def switch_active_model(payload: ModelSwitchRequest):
         r = requests.get("http://localhost:11434/api/tags", timeout=2)
         models = [m.get("name") for m in r.json().get("models", [])]
         
-        # Exact match or tagless match
         matched_model = None
         for m in models:
             if m == payload.model_name or m.split(":")[0] == payload.model_name:
@@ -718,9 +778,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
     
-    # Send initial state including LLM details
     try:
-        # Check LLM status at moment of websocket handshake
         binary_present = check_ollama_binary()
         running = is_ollama_running()
         
@@ -745,9 +803,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     "service_running": running,
                     "status": OLLAMA_INSTALL_STATUS,
                     "install_percent": OLLAMA_INSTALL_PERCENT,
+                    "install_speed": OLLAMA_INSTALL_SPEED,
+                    "install_eta": OLLAMA_INSTALL_ETA,
                     "active_model": ACTIVE_LOCAL_MODEL,
                     "pulling_model": CURRENT_PULLING_MODEL,
-                    "pull_percent": CURRENT_PULL_PERCENT
+                    "pull_percent": CURRENT_PULL_PERCENT,
+                    "pull_speed": CURRENT_PULL_SPEED,
+                    "pull_eta": CURRENT_PULL_ETA
                 }
             }
         }))
@@ -770,15 +832,11 @@ if os.path.exists(frontend_dir):
 else:
     logger.warning(f"Frontend directory not found at {frontend_dir}.")
 
-# Startup lifecycle: Launch listener thread and auto-start Ollama if binary is present
 @app.on_event("startup")
 async def startup_event():
     loop = asyncio.get_event_loop()
-    
-    # Start microphone voice listener
     threading.Thread(target=start_voice_listener, args=(loop,), daemon=True).start()
     
-    # Auto-start Ollama if binary exists
     if check_ollama_binary():
         threading.Thread(target=start_ollama_service, daemon=True).start()
 
